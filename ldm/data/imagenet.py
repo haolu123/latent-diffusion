@@ -41,10 +41,13 @@ def _ensure_filelist(datadir: str, txt_filelist: str) -> int:
     filelist = glob.glob(os.path.join(datadir, "**", "*.JPEG"), recursive=True)
     filelist_rel = [os.path.relpath(p, start=datadir) for p in filelist]
     filelist_rel = sorted(filelist_rel)
-    if not os.path.isfile(txt_filelist):
-        os.makedirs(os.path.dirname(txt_filelist), exist_ok=True)
-        with open(txt_filelist, "w") as f:
-            f.write("\n".join(filelist_rel)+"\n")
+    os.makedirs(os.path.dirname(txt_filelist), exist_ok=True)
+    with open(txt_filelist, "w") as f:
+        f.write("\n".join(filelist_rel)+"\n")
+    # if not os.path.isfile(txt_filelist):
+    #     os.makedirs(os.path.dirname(txt_filelist), exist_ok=True)
+    #     with open(txt_filelist, "w") as f:
+    #         f.write("\n".join(filelist_rel)+"\n")
     return len(filelist_rel)
 
 def synset2idx(path_to_yaml="data/index_synset.yaml"):
@@ -273,7 +276,10 @@ class ImageNetValidation(ImageNetBase):
         
         print(f"Preparing dataset {self.NAME} in {self.root}")
         datadir = self.datadir
-        if not os.path.exists(datadir) or not _imagenet_present(datadir):
+        if (not os.path.exists(datadir)) \
+            or (not _imagenet_present(datadir))\
+            or _looks_flat_val_layout(datadir):
+            
             path = os.path.join(self.root, self.FILES[0])
             if not os.path.exists(path) or not os.path.getsize(path)==self.SIZES[0]:
                 if not self.allow_at:
