@@ -16,6 +16,9 @@ from taming.data.imagenet import ImagePaths
 
 from ldm.modules.image_degradation import degradation_fn_bsr, degradation_fn_bsr_light
 
+def _looks_flat_val_layout(datadir: str) -> bool:
+    return len(glob.glob(os.path.join(datadir, "ILSVRC2012_val_*.JPEG"))) > 0
+
 def _find_imagenet_datadir(root: str) -> str:
     """Return the subdir inside 'root that actually contains class subfolders."""
     candidates = [
@@ -263,8 +266,10 @@ class ImageNetValidation(ImageNetBase):
                                     default=False)
         
         if tdu.is_prepared(self.root) and _imagenet_present(self.datadir):
-            _ = _ensure_filelist(self.datadir, self.txt_filelist)
-            return
+            if not _looks_flat_val_layout(self.datadir):
+                _ensure_filelist(self.datadir, self.txt_filelist)
+                return
+            
         
         print(f"Preparing dataset {self.NAME} in {self.root}")
         datadir = self.datadir
