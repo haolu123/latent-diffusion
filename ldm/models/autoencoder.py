@@ -33,6 +33,8 @@ class VQModel(pl.LightningModule):
                  use_ema=False
                  ):
         super().__init__()
+        # PL 2.x : manual optimization for multi-optimizer training
+        self.automatic_optimization = False
         self.embed_dim = embed_dim
         self.n_embed = n_embed
         self.image_key = image_key
@@ -142,27 +144,47 @@ class VQModel(pl.LightningModule):
             x = x.detach()
         return x
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
-        # https://github.com/pytorch/pytorch/issues/37142
-        # try not to fool the heuristics
+    def training_step(self, batch, batch_idx):
+        # manual optimization: step AE (gen) then D
+        opt_list = self.optimizers()
+        if isinstance(opt_list, (list, tuple)):
+            opt_ae = opt_list[0]
+            opt_disc = opt_list[1] if len(opt_list) > 1 else None
+        else:
+            opt_ae, opt_disc = opt_list, None
+
         x = self.get_input(batch, self.image_key)
         xrec, qloss, ind = self(x, return_pred_indices=True)
 
-        if optimizer_idx == 0:
-            # autoencode
-            aeloss, log_dict_ae = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
+        #---------------AE/generator step -------------------
+        if hasattr(self, "toggle_optimizer"):
+            self.toggle_optimizer(opt_ae)
+        aeloss, log_dict_ae = self.loss(qloss, x, xrec, 0, self.global_step,
                                             last_layer=self.get_last_layer(), split="train",
                                             predicted_indices=ind)
-
+        opt_ae.zero_grad(set_to_none=True)
+        self.manual_backward(aeloss)
+        opt_ae.step()
+        if hasattr(self, "untoggle_optimizer"):
+            self.untoggle_optimizer(opt_ae)
+        if isinstance(log_dict_ae, dict):
             self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-            return aeloss
-
-        if optimizer_idx == 1:
-            # discriminator
-            discloss, log_dict_disc = self.loss(qloss, x, xrec, optimizer_idx, self.global_step,
+        
+        #---------------Discriminator step (after disc_start) -------------
+        disc_start = getattr(self.loss, "disc_start", 0)
+        if opt_disc is not None and self.global_step >= disc_start:
+            if hasattr(self, "toggle_optimizer"):
+                self.toggle_optimizer(opt_disc)
+            discloss, log_dict_disc = self.loss(qloss, x, xrec, 1, self.global_step,
                                             last_layer=self.get_last_layer(), split="train")
-            self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-            return discloss
+            opt_disc.zero_grad(set_to_none=True)
+            self.manual_backward(discloss)
+            opt_disc.step()
+            if hasattr(self, "untoggle_optimizer"):
+                self.untoggle_optimizer(opt_disc)
+            if isinstance(log_dict_disc, dict):
+                self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+            return aeloss
 
     def validation_step(self, batch, batch_idx):
         log_dict = self._validation_step(batch, batch_idx)
@@ -297,6 +319,8 @@ class AutoencoderKL(pl.LightningModule):
                  monitor=None,
                  ):
         super().__init__()
+        # PL 2.x : manual optimization for multi-optimizer training
+        self.automatic_optimization = False
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
@@ -351,26 +375,69 @@ class AutoencoderKL(pl.LightningModule):
         x = x.permute(0, 3, 1, 2).to(memory_format=torch.contiguous_format).float()
         return x
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx):
+        # manual optimization: step AE (gen) then D
+        opt_list = self.optimizers()
+        if isinstance(opt_list, (list, tuple)):
+            opt_ae = opt_list[0]
+            opt_disc = opt_list[1] if len(opt_list) > 1 else None
+        else:
+            opt_ae, opt_disc = opt_list, None
+
         inputs = self.get_input(batch, self.image_key)
         reconstructions, posterior = self(inputs)
 
-        if optimizer_idx == 0:
-            # train encoder+decoder+logvar
-            aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, optimizer_idx, self.global_step,
+        #---------------AE/generator step -------------------
+        if hasattr(self, "toggle_optimizer"):
+            self.toggle_optimizer(opt_ae)
+        aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, 0, self.global_step,
                                             last_layer=self.get_last_layer(), split="train")
-            self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        opt_ae.zero_grad(set_to_none=True)
+        self.manual_backward(aeloss)
+        opt_ae.step()
+        if hasattr(self, "untoggle_optimizer"):
+            self.untoggle_optimizer(opt_ae)
+        self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+        if isinstance(log_dict_ae, dict):
             self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+        
+        #---------------Discriminator step (after disc_start) -------------
+        disc_start = getattr(self.loss, "disc_start", 0)
+        if opt_disc is not None and self.global_step >= disc_start:
+            if hasattr(self, "toggle_optimizer"):
+                self.toggle_optimizer(opt_disc)
+            discloss, log_dict_disc = self.loss(inputs, reconstructions, posterior, 1, self.global_step,
+                                            last_layer=self.get_last_layer(), split="train")
+            opt_disc.zero_grad(set_to_none=True)
+            self.manual_backward(discloss)
+            opt_disc.step()
+            if hasattr(self, "untoggle_optimizer"):
+                self.untoggle_optimizer(opt_disc)
+            self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+            if isinstance(log_dict_disc, dict):
+                self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
             return aeloss
+        
+    # def training_step(self, batch, batch_idx, optimizer_idx):
+    #     inputs = self.get_input(batch, self.image_key)
+    #     reconstructions, posterior = self(inputs)
 
-        if optimizer_idx == 1:
-            # train the discriminator
-            discloss, log_dict_disc = self.loss(inputs, reconstructions, posterior, optimizer_idx, self.global_step,
-                                                last_layer=self.get_last_layer(), split="train")
+    #     if optimizer_idx == 0:
+    #         # train encoder+decoder+logvar
+    #         aeloss, log_dict_ae = self.loss(inputs, reconstructions, posterior, optimizer_idx, self.global_step,
+    #                                         last_layer=self.get_last_layer(), split="train")
+    #         self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+    #         self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+    #         return aeloss
 
-            self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
-            self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
-            return discloss
+    #     if optimizer_idx == 1:
+    #         # train the discriminator
+    #         discloss, log_dict_disc = self.loss(inputs, reconstructions, posterior, optimizer_idx, self.global_step,
+    #                                             last_layer=self.get_last_layer(), split="train")
+
+    #         self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+    #         self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+    #         return discloss
 
     def validation_step(self, batch, batch_idx):
         inputs = self.get_input(batch, self.image_key)
