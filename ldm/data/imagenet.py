@@ -16,10 +16,37 @@ from taming.data.imagenet import ImagePaths
 
 from ldm.modules.image_degradation import degradation_fn_bsr, degradation_fn_bsr_light
 
+def _find_imagenet_datadir(root: str) -> str:
+    """Return the subdir inside 'root that actually contains class subfolders."""
+    candidates = [
+        os.path.join(root, "data"),
+        root, 
+        os.path.join(root, "ILSVRC", "Data", "CLS-LOC")
+    ]
+    for d in candidates:
+        if _imagenet_present(d):
+            return d
+    return os.path.join(root, "data")
+
+def _imagenet_present(datadir: str) -> bool:
+    if not os.path.isdir(datadir):
+        return False
+    some = glob.glob(os.path.join(datadir, "**", "*.JPEG"), recursive=True)
+    return len(some) > 0
+
+def _ensure_filelist(datadir: str, txt_filelist: str) -> int:
+    filelist = glob.glob(os.path.join(datadir, "**", "*.JPEG"), recursive=True)
+    filelist_rel = [os.path.relpath(p, start=datadir) for p in filelist]
+    filelist_rel = sorted(filelist_rel)
+    if not os.path.isfile(txt_filelist):
+        os.makedirs(os.path.dirname(txt_filelist), exist_ok=True)
+        with open(txt_filelist, "w") as f:
+            f.write("\n".join(filelist_rel)+"\n")
+    return len(filelist_rel)
 
 def synset2idx(path_to_yaml="data/index_synset.yaml"):
     with open(path_to_yaml) as f:
-        di2s = yaml.load(f)
+        di2s = yaml.safe_load(f)
     return dict((v,k) for k,v in di2s.items())
 
 
@@ -142,9 +169,10 @@ class ImageNetTrain(ImageNetBase):
         147897477120,
     ]
 
-    def __init__(self, process_images=True, data_root=None, **kwargs):
+    def __init__(self, process_images=True, data_root=None, allow_at = False, **kwargs):
         self.process_images = process_images
         self.data_root = data_root
+        self.allow_at = allow_at
         super().__init__(**kwargs)
 
     def _prepare(self):
@@ -154,44 +182,51 @@ class ImageNetTrain(ImageNetBase):
             cachedir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
             self.root = os.path.join(cachedir, "autoencoders/data", self.NAME)
 
-        self.datadir = os.path.join(self.root, "data")
+        # self.datadir = os.path.join(self.root, "data")
+        self.datadir = _find_imagenet_datadir(self.root)
         self.txt_filelist = os.path.join(self.root, "filelist.txt")
         self.expected_length = 1281167
         self.random_crop = retrieve(self.config, "ImageNetTrain/random_crop",
                                     default=True)
-        if not tdu.is_prepared(self.root):
-            # prep
-            print("Preparing dataset {} in {}".format(self.NAME, self.root))
-
-            datadir = self.datadir
-            if not os.path.exists(datadir):
-                path = os.path.join(self.root, self.FILES[0])
-                if not os.path.exists(path) or not os.path.getsize(path)==self.SIZES[0]:
-                    import academictorrents as at
-                    atpath = at.get(self.AT_HASH, datastore=self.root)
-                    assert atpath == path
-
-                print("Extracting {} to {}".format(path, datadir))
-                os.makedirs(datadir, exist_ok=True)
-                with tarfile.open(path, "r:") as tar:
-                    tar.extractall(path=datadir)
-
-                print("Extracting sub-tars.")
-                subpaths = sorted(glob.glob(os.path.join(datadir, "*.tar")))
-                for subpath in tqdm(subpaths):
-                    subdir = subpath[:-len(".tar")]
-                    os.makedirs(subdir, exist_ok=True)
-                    with tarfile.open(subpath, "r:") as tar:
-                        tar.extractall(path=subdir)
-
-            filelist = glob.glob(os.path.join(datadir, "**", "*.JPEG"))
-            filelist = [os.path.relpath(p, start=datadir) for p in filelist]
-            filelist = sorted(filelist)
-            filelist = "\n".join(filelist)+"\n"
-            with open(self.txt_filelist, "w") as f:
-                f.write(filelist)
-
-            tdu.mark_prepared(self.root)
+        if tdu.is_prepared(self.root) and _imagenet_present(self.datadir):
+            _ = _ensure_filelist(self.datadir, self.txt_filelist)
+            return
+        
+        print(f"Preparing dataset {self.NAME} in {self.root}")
+        datadir = self.datadir
+        if not os.path.exists(datadir) or not _imagenet_present(datadir):
+            path = os.path.join(self.root, self.FILES[0])
+            if not os.path.exists(path) or not os.path.getsize(path)==self.SIZES[0]:
+                if not self.allow_at:
+                    raise FileNotFoundError(
+                        f"ImageNet TRAIN not found locally. \n"
+                        f"Expected image under: {datadir} \n"
+                        f"or tar at: {path}\n"
+                        f"Set allow_at=True to fetch via AcademicTorrents."
+                    )
+                import academictorrents as at
+                atpath = at.get(self.AT_HASH, datastore=self.root)
+                assert atpath == path
+            
+            print("Extracting {} to {}".format(path, datadir))
+            os.makedirs(datadir, exist_ok=True)
+            with tarfile.open(path, "r:") as tar:
+                tar.extractall(path=datadir)
+            
+            print("Extracting sub-tar")
+            subpaths = sorted(glob.glob(os.path.join(datadir, "*.tar")))
+            for subpath in tqdm(subpaths):
+                subdir = subpath[:-len(".tar")]
+                os.makedirs(subdir, exist_ok=True)
+                with tarfile.open(subpath, "r:") as tar:
+                    tar.extractall(path=subdir)
+            datadir = _find_imagenet_datadir(self.root)
+            self.datadir = datadir
+        count = _ensure_filelist(datadir, self.txt_filelist)
+        if count != self.expected_length:
+            print(f"[WARN] TRAIN image found: {count}, expected: {self.expected_length}")
+        tdu.mark_prepared(self.root)
+        
 
 
 class ImageNetValidation(ImageNetBase):
@@ -208,9 +243,10 @@ class ImageNetValidation(ImageNetBase):
         1950000,
     ]
 
-    def __init__(self, process_images=True, data_root=None, **kwargs):
+    def __init__(self, process_images=True, data_root=None, allow_at=False, **kwargs):
         self.data_root = data_root
         self.process_images = process_images
+        self.allow_at = allow_at
         super().__init__(**kwargs)
 
     def _prepare(self):
@@ -219,53 +255,60 @@ class ImageNetValidation(ImageNetBase):
         else:
             cachedir = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
             self.root = os.path.join(cachedir, "autoencoders/data", self.NAME)
-        self.datadir = os.path.join(self.root, "data")
+        # self.datadir = os.path.join(self.root, "data")
+        self.datadir = _find_imagenet_datadir(self.root)
         self.txt_filelist = os.path.join(self.root, "filelist.txt")
         self.expected_length = 50000
         self.random_crop = retrieve(self.config, "ImageNetValidation/random_crop",
                                     default=False)
-        if not tdu.is_prepared(self.root):
-            # prep
-            print("Preparing dataset {} in {}".format(self.NAME, self.root))
+        
+        if tdu.is_prepared(self.root) and _imagenet_present(self.datadir):
+            _ = _ensure_filelist(self.datadir, self.txt_filelist)
+            return
+        
+        print(f"Preparing dataset {self.NAME} in {self.root}")
+        datadir = self.datadir
+        if not os.path.exists(datadir) or not _imagenet_present(datadir):
+            path = os.path.join(self.root, self.FILES[0])
+            if not os.path.exists(path) or not os.path.getsize(path)==self.SIZES[0]:
+                if not self.allow_at:
+                    raise FileNotFoundError(
+                        f"ImageNet VAL not found locally. \n"
+                        f"Expected image under: {datadir} \n"
+                        f"or tar at: {path}\n"
+                        f"Set allow_at=True to fetch via AcademicTorrents."
+                    )
+                import academictorrents as at
+                atpath = at.get(self.AT_HASH, datastore=self.root)
+                assert atpath == path
 
-            datadir = self.datadir
-            if not os.path.exists(datadir):
-                path = os.path.join(self.root, self.FILES[0])
-                if not os.path.exists(path) or not os.path.getsize(path)==self.SIZES[0]:
-                    import academictorrents as at
-                    atpath = at.get(self.AT_HASH, datastore=self.root)
-                    assert atpath == path
+            print("Extracting {} to {}".format(path, datadir))
+            os.makedirs(datadir, exist_ok=True)
+            with tarfile.open(path, "r:") as tar:
+                tar.extractall(path=datadir)
 
-                print("Extracting {} to {}".format(path, datadir))
-                os.makedirs(datadir, exist_ok=True)
-                with tarfile.open(path, "r:") as tar:
-                    tar.extractall(path=datadir)
+            vspath = os.path.join(self.root, self.FILES[1])
+            if not os.path.exists(vspath) or not os.path.getsize(vspath) == self.SIZES[1]:
+                download(self.VS_URL, vspath)
 
-                vspath = os.path.join(self.root, self.FILES[1])
-                if not os.path.exists(vspath) or not os.path.getsize(vspath)==self.SIZES[1]:
-                    download(self.VS_URL, vspath)
+            with open(vspath, "r") as f:
+                synset_dict = f.read().splitlines()
+                synset_dict = dict(line.split() for line in synset_dict)
 
-                with open(vspath, "r") as f:
-                    synset_dict = f.read().splitlines()
-                    synset_dict = dict(line.split() for line in synset_dict)
-
-                print("Reorganizing into synset folders")
-                synsets = np.unique(list(synset_dict.values()))
-                for s in synsets:
-                    os.makedirs(os.path.join(datadir, s), exist_ok=True)
-                for k, v in synset_dict.items():
-                    src = os.path.join(datadir, k)
-                    dst = os.path.join(datadir, v)
-                    shutil.move(src, dst)
-
-            filelist = glob.glob(os.path.join(datadir, "**", "*.JPEG"))
-            filelist = [os.path.relpath(p, start=datadir) for p in filelist]
-            filelist = sorted(filelist)
-            filelist = "\n".join(filelist)+"\n"
-            with open(self.txt_filelist, "w") as f:
-                f.write(filelist)
-
-            tdu.mark_prepared(self.root)
+            print("Reorganizing into synset folders")
+            synsets = np.unique(list(synset_dict.values()))
+            for s in synsets:
+                os.makedirs(os.path.join(datadir, s), exist_ok=True)
+            for k, v in synset_dict.items():
+                src = os.path.join(datadir, k)
+                dst = os.path.join(datadir, v)
+                shutil.move(src, dst)
+            datadir = _find_imagenet_datadir(self.root)
+            self.datadir = datadir
+        count = _ensure_filelist(datadir, self.txt_filelist)
+        if count != self.expected_length:
+            print(f"[WARN] VAL image found: {count}, expected: {self.expected_length}")
+        tdu.mark_prepared(self.root)
 
 
 
@@ -273,7 +316,8 @@ class ImageNetSR(Dataset):
     def __init__(self, size=None,
                  degradation=None, downscale_f=4, min_crop_f=0.5, max_crop_f=1., 
                  data_root=None,
-                 random_crop=True):
+                 random_crop=True,
+                 allow_at=False):
         """
         Imagenet Superresolution Dataloader
         Performs following ops in order:
@@ -291,6 +335,7 @@ class ImageNetSR(Dataset):
         :param random_crop:
         """
         self.data_root = data_root
+        self.allow_at = allow_at
         self.base = self.get_base()
         assert size
         assert (size / downscale_f).is_integer()
@@ -382,7 +427,11 @@ class ImageNetSRTrain(ImageNetSR):
     def get_base(self):
         with open("data/imagenet_train_hr_indices.p", "rb") as f:
             indices = pickle.load(f)
-        dset = ImageNetTrain(process_images=False, data_root=self.data_root)
+        dset = ImageNetTrain(
+            process_images = False, 
+            data_root = self.data_root,
+            allow_at = self.allow_at
+            )
         return Subset(dset, indices)
 
 
@@ -393,5 +442,9 @@ class ImageNetSRValidation(ImageNetSR):
     def get_base(self):
         with open("data/imagenet_val_hr_indices.p", "rb") as f:
             indices = pickle.load(f)
-        dset = ImageNetValidation(process_images=False, data_root=self.data_root)
+        dset = ImageNetValidation(
+            process_images = False, 
+            data_root = self.data_root,
+            allow_at = self.allow_at
+            )
         return Subset(dset, indices)

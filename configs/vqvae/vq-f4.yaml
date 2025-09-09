@@ -38,12 +38,14 @@ data:
       target: ldm.data.imagenet.ImageNetSRTrain
       params:
         data_root: /isilon/datalake/gurcan_rsch/original/cialab/ImageNet_2012
+        allow_at: false
         size: 256
         degradation: pil_nearest
     validation:
       target: ldm.data.imagenet.ImageNetSRValidation
       params:
         data_root: /isilon/datalake/gurcan_rsch/original/cialab/ImageNet_2012
+        allow_at: false
         size: 256
         degradation: pil_nearest
 
