@@ -1,3 +1,13 @@
+import inspect
+if not hasattr(inspect, "getargspec"):
+    from collections import namedtuple
+    ArgSpec = namedtuple('ArgSpec', 'args varargs keywords defaults')
+
+    def getargspec(func):
+        """Minimal backpot of inspect.getargspec using getfullargspec"""
+        full = inspect.getfullargspec(func)
+        return ArgSpec(full.args, full.varargs, full.varkw, full.defaults)
+
 import argparse, os, sys, datetime, glob, importlib, csv
 import numpy as np
 import time
@@ -14,7 +24,8 @@ from PIL import Image
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-from pytorch_lightning.utilities.distributed import rank_zero_only
+# from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
@@ -123,11 +134,11 @@ def get_parser(**parser_kwargs):
     return parser
 
 
-def nondefault_trainer_args(opt):
-    parser = argparse.ArgumentParser()
-    parser = Trainer.add_argparse_args(parser)
-    args = parser.parse_args([])
-    return sorted(k for k in vars(args) if getattr(opt, k) != getattr(args, k))
+# def nondefault_trainer_args(opt):
+#     parser = argparse.ArgumentParser()
+#     parser = Trainer.add_argparse_args(parser)
+#     args = parser.parse_args([])
+#     return sorted(k for k in vars(args) if getattr(opt, k) != getattr(args, k))
 
 
 class WrappedDataset(Dataset):
@@ -295,7 +306,7 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            pl.loggers.TestTubeLogger: self._testtube,
+            pl.loggers.TensorBoardLogger: self._tensorboard,
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
@@ -307,7 +318,7 @@ class ImageLogger(Callback):
         self.log_first_step = log_first_step
 
     @rank_zero_only
-    def _testtube(self, pl_module, images, batch_idx, split):
+    def _tensorboard(self, pl_module, images, batch_idx, split):
         for k in images:
             grid = torchvision.utils.make_grid(images[k])
             grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
@@ -465,7 +476,7 @@ if __name__ == "__main__":
     sys.path.append(os.getcwd())
 
     parser = get_parser()
-    parser = Trainer.add_argparse_args(parser)
+    # parser = Trainer.add_argparse_args(parser)
 
     opt, unknown = parser.parse_known_args()
     if opt.name and opt.resume:
@@ -514,21 +525,42 @@ if __name__ == "__main__":
         configs = [OmegaConf.load(cfg) for cfg in opt.base]
         cli = OmegaConf.from_dotlist(unknown)
         config = OmegaConf.merge(*configs, cli)
+
         lightning_config = config.pop("lightning", OmegaConf.create())
-        # merge trainer cli with config
-        trainer_config = lightning_config.get("trainer", OmegaConf.create())
-        # default to ddp
-        trainer_config["accelerator"] = "ddp"
-        for k in nondefault_trainer_args(opt):
-            trainer_config[k] = getattr(opt, k)
-        if not "gpus" in trainer_config:
-            del trainer_config["accelerator"]
-            cpu = True
-        else:
-            gpuinfo = trainer_config["gpus"]
-            print(f"Running on GPUs {gpuinfo}")
-            cpu = False
-        trainer_opt = argparse.Namespace(**trainer_config)
+        trainer_config = dict(lightning_config.get("trainer", OmegaConf.create()))
+
+        # ---- Map/normalize device settings to Lightning 2.x ----
+        # Accept either legacy 'gpus' from old configs or new 'devices'
+        legacy_gpus = trainer_config.pop("gpus", None)
+        devices = trainer_config.get("devices", None)
+
+        if legacy_gpus is not None and devices is None:
+            # support strings like "0,1,2" or ints
+            if isinstance(legacy_gpus, str):
+                devices = [int(x) for x in legacy_gpus.strip().split(",") if x != ""]
+            else:
+                devices = legacy_gpus
+            trainer_config["devices"] = devices
+
+        # accelerator
+        if "accelerator" not in trainer_config:
+            trainer_config["accelerator"] = "gpu" if torch.cuda.is_available() else "cpu"
+
+        # choose strategy automatically: ddp only if multi-device
+        if "strategy" not in trainer_config:
+            num_devices = 1
+            if isinstance(trainer_config.get("devices"), (list, tuple)):
+                num_devices = len(trainer_config["devices"])
+            elif isinstance(trainer_config.get("devices"), int):
+                num_devices = trainer_config["devices"]
+            if trainer_config["accelerator"] == "gpu" and num_devices > 1:
+                trainer_config["strategy"] = "ddp"
+
+        cpu = (trainer_config.get("accelerator") == "cpu")
+        if not cpu:
+            print(f"Running on accelerator={trainer_config['accelerator']}, devices={trainer_config.get('devices')}")
+
+        # Persist back
         lightning_config.trainer = trainer_config
 
         # model
@@ -548,15 +580,15 @@ if __name__ == "__main__":
                     "id": nowname,
                 }
             },
-            "testtube": {
-                "target": "pytorch_lightning.loggers.TestTubeLogger",
+            "tensorboard": {
+                "target": "pytorch_lightning.loggers.TensorBoardLogger",
                 "params": {
-                    "name": "testtube",
+                    "name": "tensorboard",
                     "save_dir": logdir,
                 }
             },
         }
-        default_logger_cfg = default_logger_cfgs["testtube"]
+        default_logger_cfg = default_logger_cfgs["tensorboard"]
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:
@@ -656,8 +688,8 @@ if __name__ == "__main__":
 
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
 
-        trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
-        trainer.logdir = logdir  ###
+        trainer = pl.Trainer(**trainer_config, **trainer_kwargs)
+        trainer.logdir = logdir
 
         # data
         data = instantiate_from_config(config.data)
@@ -672,10 +704,16 @@ if __name__ == "__main__":
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
-        if not cpu:
-            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
-        else:
+        if cpu:
             ngpu = 1
+        else:
+            dev = lightning_config.trainer.get("devices", 1)
+            if isinstance(dev, int):
+                ngpu = dev
+            elif isinstance(dev, (list, tuple)):
+                ngpu = len(dev)
+            else:
+                ngpu = 1
         if 'accumulate_grad_batches' in lightning_config.trainer:
             accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
         else:
@@ -696,14 +734,14 @@ if __name__ == "__main__":
         # allow checkpointing via USR1
         def melk(*args, **kwargs):
             # run all checkpoint hooks
-            if trainer.global_rank == 0:
+            if 'trainer' in globals() and getattr(trainer, "global_rank", 0) == 0:
                 print("Summoning checkpoint.")
                 ckpt_path = os.path.join(ckptdir, "last.ckpt")
                 trainer.save_checkpoint(ckpt_path)
 
 
         def divein(*args, **kwargs):
-            if trainer.global_rank == 0:
+            if "trainer" in globals() and getattr(trainer, "global_rank", 0) == 0:
                 import pudb;
                 pudb.set_trace()
 

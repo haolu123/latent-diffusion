@@ -1,0 +1,35 @@
+[rank: 0] Seed set to 23
+/isilon/datalake/cialab/scratch/cialab/Hao/miniconda3/envs/vqVAE/lib/python3.11/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/isilon/datalake/cialab/scratch/cialab/Hao/miniconda3/envs/vqVAE/lib/python3.11/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=VGG16_Weights.IMAGENET1K_V1`. You can also use `weights=VGG16_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+/isilon/datalake/cialab/scratch/cialab/Hao/miniconda3/envs/vqVAE/lib/python3.11/site-packages/taming/modules/losses/lpips.py:29: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  self.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+Traceback (most recent call last):
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/work_record/Project4_ear/codes/vq_imageNet/latent-diffusion/main.py", line 689, in <module>
+    data.prepare_data()
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/work_record/Project4_ear/codes/vq_imageNet/latent-diffusion/main.py", line 188, in prepare_data
+    instantiate_from_config(data_cfg)
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/work_record/Project4_ear/codes/vq_imageNet/latent-diffusion/ldm/util.py", line 85, in instantiate_from_config
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/work_record/Project4_ear/codes/vq_imageNet/latent-diffusion/ldm/util.py", line 93, in get_obj_from_str
+    return getattr(importlib.import_module(module, package=None), cls)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/miniconda3/envs/vqVAE/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/work_record/Project4_ear/codes/vq_imageNet/latent-diffusion/ldm/data/imagenet.py", line 14, in <module>
+    from taming.data.imagenet import str_to_indices, give_synsets_from_indices, download, retrieve
+  File "/isilon/datalake/cialab/scratch/cialab/Hao/miniconda3/envs/vqVAE/lib/python3.11/site-packages/taming/data/imagenet.py", line 522, in <module>
+    from skimage.feature import canny
+ModuleNotFoundError: No module named 'skimage'

@@ -271,7 +271,8 @@ class ImageNetValidation(ImageNetBase):
 
 class ImageNetSR(Dataset):
     def __init__(self, size=None,
-                 degradation=None, downscale_f=4, min_crop_f=0.5, max_crop_f=1.,
+                 degradation=None, downscale_f=4, min_crop_f=0.5, max_crop_f=1., 
+                 data_root=None,
                  random_crop=True):
         """
         Imagenet Superresolution Dataloader
@@ -289,6 +290,7 @@ class ImageNetSR(Dataset):
         :param data_root:
         :param random_crop:
         """
+        self.data_root = data_root
         self.base = self.get_base()
         assert size
         assert (size / downscale_f).is_integer()
@@ -298,6 +300,7 @@ class ImageNetSR(Dataset):
         self.max_crop_f = max_crop_f
         assert(max_crop_f <= 1.)
         self.center_crop = not random_crop
+        
 
         self.image_rescaler = albumentations.SmallestMaxSize(max_size=size, interpolation=cv2.INTER_AREA)
 
@@ -379,7 +382,7 @@ class ImageNetSRTrain(ImageNetSR):
     def get_base(self):
         with open("data/imagenet_train_hr_indices.p", "rb") as f:
             indices = pickle.load(f)
-        dset = ImageNetTrain(process_images=False,)
+        dset = ImageNetTrain(process_images=False, data_root=self.data_root)
         return Subset(dset, indices)
 
 
@@ -390,5 +393,5 @@ class ImageNetSRValidation(ImageNetSR):
     def get_base(self):
         with open("data/imagenet_val_hr_indices.p", "rb") as f:
             indices = pickle.load(f)
-        dset = ImageNetValidation(process_images=False,)
+        dset = ImageNetValidation(process_images=False, data_root=self.data_root)
         return Subset(dset, indices)

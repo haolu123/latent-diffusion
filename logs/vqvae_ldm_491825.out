@@ -1,0 +1,10 @@
+Job started on Tue Sep  9 09:57:45 AM EDT 2025
+Running on node: cia011
+Running on accelerator=gpu, devices=None
+making attention of type 'vanilla' with 512 in_channels
+Working with z of shape (1, 3, 64, 64) = 12288 dimensions.
+making attention of type 'vanilla' with 512 in_channels
+Downloading vgg_lpips model from https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1 to taming/modules/autoencoder/lpips/vgg.pth
+loaded pretrained LPIPS loss from taming/modules/autoencoder/lpips/vgg.pth
+VQLPIPSWithDiscriminator running with hinge loss.
+Job finished on Tue Sep  9 09:58:09 AM EDT 2025

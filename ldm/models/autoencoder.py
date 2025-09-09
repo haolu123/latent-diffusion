@@ -9,7 +9,10 @@ from ldm.modules.diffusionmodules.model import Encoder, Decoder
 from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
 
 from ldm.util import instantiate_from_config
-
+import numpy as np
+from ldm.modules.ema import LitEma
+from torch.optim.lr_scheduler import LambdaLR
+from packaging import version
 
 class VQModel(pl.LightningModule):
     def __init__(self,
