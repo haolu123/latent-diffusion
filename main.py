@@ -709,8 +709,14 @@ if __name__ == "__main__":
             default_callbacks_cfg.update(default_metrics_over_trainsteps_ckpt_dict)
 
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
-        if 'ignore_keys_callback' in callbacks_cfg and hasattr(trainer_opt, 'resume_from_checkpoint'):
-            callbacks_cfg.ignore_keys_callback.params['ckpt_path'] = trainer_opt.resume_from_checkpoint
+        if 'ignore_keys_callback' in callbacks_cfg: 
+            ckpt_path = getattr(opt, 'resume_from_checkpoint', None)
+            if ckpt_path:
+                callbacks_cfg.ignore_keys_callback.params['ckpt_path'] = ckpt_path
+            else:
+                # no checkpoint to load -> remove the callback to avoid a misconfig
+                del callbacks_cfg['ignore_keys_callback']
+            # callbacks_cfg.ignore_keys_callback.params['ckpt_path'] = trainer_opt.resume_from_checkpoint
         elif 'ignore_keys_callback' in callbacks_cfg:
             del callbacks_cfg['ignore_keys_callback']
 
