@@ -1,5 +1,0 @@
-Traceback (most recent call last):
-  File "/isilon/datalake/cialab/scratch/cialab/Hao/work_record/Project4_ear/codes/vq_imageNet/latent-diffusion/main.py", line 469, in <module>
-    parser = Trainer.add_argparse_args(parser)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^
-AttributeError: type object 'Trainer' has no attribute 'add_argparse_args'
