@@ -14,6 +14,12 @@ from ldm.modules.ema import LitEma
 from torch.optim.lr_scheduler import LambdaLR
 from packaging import version
 
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, LearnedPerceptualImagePatchSimilarity
+from torchmetrics.image.fid import FrechetInceptionDistance
+import torch
+import torch.nn.functional as F
+# from piq import NLPD
+
 class VQModel(pl.LightningModule):
     def __init__(self,
                  ddconfig,
@@ -37,6 +43,10 @@ class VQModel(pl.LightningModule):
         self.automatic_optimization = False
         self.embed_dim = embed_dim
         self.n_embed = n_embed
+
+        # track which codebook entries were used in the current val epoch
+        self.register_buffer("val_code_used", torch.zeros(self.n_embed, dtype=torch.bool), persistent=False)
+
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
@@ -64,6 +74,23 @@ class VQModel(pl.LightningModule):
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
         self.scheduler_config = scheduler_config
         self.lr_g_factor = lr_g_factor
+
+        # metrics (expect inputs in [0,1])
+        self.psnr  = PeakSignalNoiseRatio(data_range=1.0)
+        self.ssim  = StructuralSimilarityIndexMeasure(data_range=1.0)
+        self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg')  # or 'alex'
+        self.fid   = FrechetInceptionDistance(feature=2048)
+
+        # NLPD from PIQ (module, not torchmetrics)
+        # self.nlpd = NLPD()  # moved to correct device in setup()
+
+
+    # def on_fit_start(self):
+    #     # ensure PIQ module is on the same device
+    #     self.nlpd = self.nlpd.to(self.device)
+
+    def _to_01(self, x):
+        return (x + 1.0) / 2.0
 
     @contextmanager
     def ema_scope(self, context=None):
@@ -160,16 +187,23 @@ class VQModel(pl.LightningModule):
         if hasattr(self, "toggle_optimizer"):
             self.toggle_optimizer(opt_ae)
         aeloss, log_dict_ae = self.loss(qloss, x, xrec, 0, self.global_step,
-                                            last_layer=self.get_last_layer(), split="train",
-                                            predicted_indices=ind)
+                                            last_layer=self.get_last_layer(), split="train")
+                                            # predicted_indices=ind)
         opt_ae.zero_grad(set_to_none=True)
         self.manual_backward(aeloss)
         opt_ae.step()
         if hasattr(self, "untoggle_optimizer"):
             self.untoggle_optimizer(opt_ae)
         if isinstance(log_dict_ae, dict):
-            self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=True)
-        
+            self.log_dict(
+                log_dict_ae, 
+                prog_bar=False, 
+                logger=True, 
+                on_step=True, 
+                on_epoch=True,
+                batch_size=x.size(0)
+                )
+         
         #---------------Discriminator step (after disc_start) -------------
         disc_start = getattr(self.loss, "disc_start", 0)
         if opt_disc is not None and self.global_step >= disc_start:
@@ -183,7 +217,13 @@ class VQModel(pl.LightningModule):
             if hasattr(self, "untoggle_optimizer"):
                 self.untoggle_optimizer(opt_disc)
             if isinstance(log_dict_disc, dict):
-                self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+                self.log_dict(
+                    log_dict_disc, 
+                    prog_bar=False, 
+                    logger=True, 
+                    on_step=True, 
+                    on_epoch=True,
+                    batch_size=x.size(0))
             return aeloss
 
     def validation_step(self, batch, batch_idx):
@@ -199,25 +239,106 @@ class VQModel(pl.LightningModule):
                                         self.global_step,
                                         last_layer=self.get_last_layer(),
                                         split="val"+suffix,
-                                        predicted_indices=ind
+                                        # predicted_indices=ind
                                         )
 
         discloss, log_dict_disc = self.loss(qloss, x, xrec, 1,
                                             self.global_step,
                                             last_layer=self.get_last_layer(),
                                             split="val"+suffix,
-                                            predicted_indices=ind
+                                            # predicted_indices=ind
                                             )
         rec_loss = log_dict_ae[f"val{suffix}/rec_loss"]
+        # self.log(f"val{suffix}/rec_loss", rec_loss,
+        #            prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
+        # self.log(f"val{suffix}/aeloss", aeloss,
+        #            prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
+        # if version.parse(pl.__version__) >= version.parse('1.4.0'):
+        #     del log_dict_ae[f"val{suffix}/rec_loss"]
+        # self.log_dict(log_dict_ae)
+        # self.log_dict(log_dict_disc)
+        bs = x.size(0)
         self.log(f"val{suffix}/rec_loss", rec_loss,
-                   prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
+                 prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True,
+                 batch_size=bs)
         self.log(f"val{suffix}/aeloss", aeloss,
-                   prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True)
-        if version.parse(pl.__version__) >= version.parse('1.4.0'):
-            del log_dict_ae[f"val{suffix}/rec_loss"]
-        self.log_dict(log_dict_ae)
-        self.log_dict(log_dict_disc)
+                 prog_bar=True, logger=True, on_step=False, on_epoch=True, sync_dist=True,
+                 batch_size=bs)
+        # avoid duplicate logging of the same key
+        log_dict_ae.pop(f"val{suffix}/rec_loss", None)
+        self.log_dict(log_dict_ae, on_step=False, on_epoch=True, batch_size=bs)
+        self.log_dict(log_dict_disc, on_step=False, on_epoch=True, batch_size=bs)
+        # ... you already have:
+        # ---- Metrics block (add this) ----
+        bs = x.size(0)
+        x01    = self._to_01(x).clamp(0,1)
+        xrec01 = self._to_01(xrec).clamp(0,1)
+
+        # PSNR / SSIM / LPIPS (batched, averaged internally)
+        psnr_val  = self.psnr(xrec01, x01)
+        ssim_val  = self.ssim(xrec01, x01)
+        lpips_val = self.lpips(xrec01, x01)
+
+        # NLPD (PIQ) expects float in [0,1]
+        # nlpd_val = self.nlpd(xrec01, x01)
+
+        # rFID accumulator (real vs recon)
+        # torchmetrics FID accepts uint8 in [0,255] with shape NCHW
+        x_fid    = (x01    * 255).to(torch.uint8)
+        xrec_fid = (xrec01 * 255).to(torch.uint8)
+        self.fid.update(x_fid,    real=True)
+        self.fid.update(xrec_fid, real=False)
+
+        # log per-step, aggregate to epoch
+        self.log("val/psnr",  psnr_val,  on_step=False, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bs)
+        self.log("val/ssim",  ssim_val,  on_step=False, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bs)
+        self.log("val/lpips", lpips_val, on_step=False, on_epoch=True, prog_bar=True,  sync_dist=True, batch_size=bs)
+        # self.log("val/nlpd",  nlpd_val,  on_step=False, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bs)
+        # ---- end metrics block ----
+
+        # --- accumulate code usage ---
+        # 'ind' is expected shape [B, H, W] with code indices in [0, n_embed-1]
+        used = ind.detach().reshape(-1)
+        used_unique = torch.unique(used)
+        # update bitmap on CPU to avoid GPU host syncs when large
+        self.val_code_used[used_unique.cpu()] = True
+
         return self.log_dict
+    
+    def on_validation_epoch_start(self):
+        # reset usage bitmap
+        if hasattr(self, "val_code_used"):
+            self.val_code_used.zero_()
+
+    def on_validation_epoch_end(self):
+        # finalize FID over whatever was accumulated this val run
+        try:
+            rfid_val = self.fid.compute()
+            self.log("val/rfid", rfid_val, prog_bar=True, sync_dist=True)
+        finally:
+            self.fid.reset()
+
+        # --- DDP-safe merge of usage bitmaps ---
+        local_mask = self.val_code_used.to(self.device).float()  # 0/1 as float for all_gather
+        try:
+            gathered = self.all_gather(local_mask)  # [world_size, n_embed] or [n_embed] if single proc
+            if gathered.ndim == 2:
+                merged = (gathered.sum(dim=0) > 0)
+            else:
+                merged = (gathered > 0)
+        except Exception:
+            # fallback single-process
+            merged = (local_mask > 0)
+
+        used_count = merged.sum().item()
+        usage_pct = used_count / float(self.n_embed)
+
+        # log both
+        self.log("val/codebook_used_count", used_count, prog_bar=False, sync_dist=False)
+        self.log("val/codebook_usage_pct", usage_pct, prog_bar=True, sync_dist=False)
+
+        # (optional) keep the merged view around for debugging
+        self.val_code_used = merged.to(self.val_code_used.device)
 
     def configure_optimizers(self):
         lr_d = self.learning_rate
@@ -397,9 +518,20 @@ class AutoencoderKL(pl.LightningModule):
         opt_ae.step()
         if hasattr(self, "untoggle_optimizer"):
             self.untoggle_optimizer(opt_ae)
-        self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+
+        bs = inputs.size(0)
+        self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True, batch_size=bs)
+        # self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
         if isinstance(log_dict_ae, dict):
-            self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False, batch_size=bs)
+            # self.log_dict(
+            #     log_dict_ae, 
+            #     prog_bar=False, 
+            #     logger=True, 
+            #     on_step=True, 
+            #     on_epoch=False,
+            #     batch_size=inputs.size(0)
+            #     )
         
         #---------------Discriminator step (after disc_start) -------------
         disc_start = getattr(self.loss, "disc_start", 0)
@@ -415,7 +547,13 @@ class AutoencoderKL(pl.LightningModule):
                 self.untoggle_optimizer(opt_disc)
             self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=False)
             if isinstance(log_dict_disc, dict):
-                self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
+                self.log_dict(
+                    log_dict_disc, 
+                    prog_bar=False, 
+                    logger=True, 
+                    on_step=True, 
+                    on_epoch=True,
+                    batch_size=inputs.size(0))
             return aeloss
         
     # def training_step(self, batch, batch_idx, optimizer_idx):
@@ -448,9 +586,15 @@ class AutoencoderKL(pl.LightningModule):
         discloss, log_dict_disc = self.loss(inputs, reconstructions, posterior, 1, self.global_step,
                                             last_layer=self.get_last_layer(), split="val")
 
-        self.log("val/rec_loss", log_dict_ae["val/rec_loss"])
-        self.log_dict(log_dict_ae)
-        self.log_dict(log_dict_disc)
+        # self.log("val/rec_loss", log_dict_ae["val/rec_loss"])
+        # self.log_dict(log_dict_ae)
+        # self.log_dict(log_dict_disc)
+        bs = inputs.size(0)
+        self.log("val/rec_loss", log_dict_ae["val/rec_loss"],
+                 on_step=False, on_epoch=True, batch_size=bs)
+        log_dict_ae.pop("val/rec_loss", None)   # prevent duplicate metric name
+        self.log_dict(log_dict_ae, on_step=False, on_epoch=True, batch_size=bs)
+        self.log_dict(log_dict_disc, on_step=False, on_epoch=True, batch_size=bs)
         return self.log_dict
 
     def configure_optimizers(self):

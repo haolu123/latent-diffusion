@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=4        #  
 #SBATCH --gres=gpu:1             #  
 #SBATCH --time=6-23:59:59        #  
-#SBATCH --partition=ciaq         #  
-#SBATCH --mem=32G
+#SBATCH --partition=gpu-h100         #  
+#SBATCH --mem=16G
 
 echo "Job started on $(date)" 
 echo "Running on node: $(hostname)"  

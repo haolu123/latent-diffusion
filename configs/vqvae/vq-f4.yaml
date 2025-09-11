@@ -32,24 +32,32 @@ model:
 data:
   target: main.DataModuleFromConfig
   params:
+    num_workers: 8
     batch_size: 12
     wrap: True
     train:
       target: ldm.data.imagenet.ImageNetSRTrain
       params:
-        data_root: /isilon/datalake/gurcan_rsch/original/cialab/ImageNet_2012
+        # data_root: /isilon/datalake/gurcan_rsch/original/cialab/ImageNet_2012
+        data_root: /isilon/datalake/cialab/original/cialab/image_database/ImageNet2012
         allow_at: false
         size: 256
         degradation: pil_nearest
     validation:
       target: ldm.data.imagenet.ImageNetSRValidation
       params:
-        data_root: /isilon/datalake/gurcan_rsch/original/cialab/ImageNet_2012
+        # data_root: /isilon/datalake/gurcan_rsch/original/cialab/ImageNet_2012
+        data_root: /isilon/datalake/cialab/original/cialab/image_database/ImageNet2012
         allow_at: false
         size: 256
         degradation: pil_nearest
 
 lightning:
+  trainer:
+    benchmark: true
+    accumulate_grad_batches: 1     # required for manual optimization
+    max_epochs: 20
+    val_check_interval: 50000   # run a full validation loop every 50k training batches
   callbacks:
     image_logger:
       target: main.ImageLogger
@@ -57,7 +65,24 @@ lightning:
         batch_frequency: 1000
         max_images: 8
         increase_log_steps: True
+    early_stopping:
+      target: pytorch_lightning.callbacks.EarlyStopping
+      params:
+        monitor: val/rec_loss # make sure your model logs this (you added it earlier)
+        mode: min
+        patience: 5           # tune this
+        min_delta: 0.0005     # ignore tiny improvements
+        verbose: true
 
-  trainer:
-    benchmark: True
-    accumulate_grad_batches: 2
+    # (optional) also checkpoint the best by LPIPS
+    # modelcheckpoint:
+    #   target: pytorch_lightning.callbacks.ModelCheckpoint
+    #   params:
+    #     # dirpath: ${some_ckpt_dir}         # you already set this in code
+    #     filename: "{epoch:06}-{val_lpips:.4f}"
+    #     monitor: val/lpips
+    #     mode: min
+    #     save_last: true
+    #     save_top_k: 3
+
+

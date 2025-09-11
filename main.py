@@ -391,11 +391,11 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx: int = 0):
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, 'calibrate_grad_norm'):
@@ -406,25 +406,48 @@ class ImageLogger(Callback):
 class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
-        # Reset the memory use counter
-        torch.cuda.reset_peak_memory_stats(trainer.root_gpu)
-        torch.cuda.synchronize(trainer.root_gpu)
+        # # Reset the memory use counter
+        # torch.cuda.reset_peak_memory_stats(trainer.root_gpu)
+        # torch.cuda.synchronize(trainer.root_gpu)
+        # self.start_time = time.time()
+        # Reset the memory use counter (PL 2.x)
         self.start_time = time.time()
+        if torch.cuda.is_available():
+            device = getattr(trainer.strategy, "root_device", None)
+            if device is not None and device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+                torch.cuda.synchronize(device)
 
     def on_train_epoch_end(self, trainer, pl_module, outputs):
-        torch.cuda.synchronize(trainer.root_gpu)
-        max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
+        # torch.cuda.synchronize(trainer.root_gpu)
+        # max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
+        # epoch_time = time.time() - self.start_time
+
+        # try:
+        #     max_memory = trainer.training_type_plugin.reduce(max_memory)
+        #     epoch_time = trainer.training_type_plugin.reduce(epoch_time)
+
+        #     rank_zero_info(f"Average Epoch time: {epoch_time:.2f} seconds")
+        #     rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
+        # except AttributeError:
+        #     pass
         epoch_time = time.time() - self.start_time
+        max_memory = 0.0
+        if torch.cuda.is_available():
+            device = getattr(trainer.strategy, "root_device", None)
+            if device is not None and device.type == "cuda":
+                torch.cuda.synchronize(device)
+                max_memory = torch.cuda.max_memory_allocated(device) / (2 ** 20)
 
+        # PL 2.x: use strategy.reduce
         try:
-            max_memory = trainer.training_type_plugin.reduce(max_memory)
-            epoch_time = trainer.training_type_plugin.reduce(epoch_time)
-
-            rank_zero_info(f"Average Epoch time: {epoch_time:.2f} seconds")
-            rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
-        except AttributeError:
+            max_memory = trainer.strategy.reduce(max_memory, reduce_op="mean")
+            epoch_time = trainer.strategy.reduce(epoch_time, reduce_op="mean")
+        except Exception:
             pass
 
+        rank_zero_info(f"Average Epoch time: {epoch_time:.2f} seconds")
+        rank_zero_info(f"Average Peak memory {max_memory:.2f} MiB")
 
 if __name__ == "__main__":
     # custom parser to specify config files, train, test and debug mode,
@@ -566,6 +589,11 @@ if __name__ == "__main__":
         # model
         model = instantiate_from_config(config.model)
 
+        # If the model use manual optimization, PL cannot do gradient accumulation for you.
+        if getattr(model, "automatic_optimization", True) is False:
+            acc = trainer_config.pop("accumulate_grad_batches", None)
+            if acc not in (None, 1):
+                print(f"[INFO] Manual optimization detected: ignoring accumulate_grad_batches={acc}. using 1.")
         # trainer and callbacks
         trainer_kwargs = dict()
 
@@ -718,6 +746,10 @@ if __name__ == "__main__":
             accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
         else:
             accumulate_grad_batches = 1
+        # manual opt => trainer accumulation is disabled
+        if getattr(model, "automatic_optimization", True) is False:
+            accumulate_grad_batches = 1
+            lightning_config.trainer.pop("accumulate_grad_batches", None)
         print(f"accumulate_grad_batches = {accumulate_grad_batches}")
         lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
         if opt.scale_lr:

@@ -1,0 +1,13 @@
+2025/9/10
+
+achive:
+VQGAN codes can run right now. 
+
+next step:
+    1.  do iteration based validation. 
+        Every 50K iteration, do full validation.
+    2. during the validation:
+        compute rFID, PSNR, NLPD, LPIPS, SSIM one validation set
+    3. do early stop based on LPIPS
+    4. I also need codebook usage in validation set every validation.
+
