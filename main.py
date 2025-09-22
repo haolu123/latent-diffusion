@@ -227,7 +227,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                           shuffle=shuffle)
 
     def _test_dataloader(self, shuffle=False):
-        is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(self.datasets['test'], Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
@@ -418,7 +418,7 @@ class CUDACallback(Callback):
                 torch.cuda.reset_peak_memory_stats(device)
                 torch.cuda.synchronize(device)
 
-    def on_train_epoch_end(self, trainer, pl_module, outputs):
+    def on_train_epoch_end(self, trainer, pl_module, outputs=None):
         # torch.cuda.synchronize(trainer.root_gpu)
         # max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
         # epoch_time = time.time() - self.start_time

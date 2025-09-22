@@ -36,7 +36,10 @@ class VQModel(pl.LightningModule):
                  lr_g_factor=1.0,
                  remap=None,
                  sane_index_shape=False, # tell vector quantizer to return indices as bhw
-                 use_ema=False
+                 use_ema=False,
+                 quantizeconfig=None,     # <--- 新增：可选的量化器配置（instantiate_from_config）
+                 val_interval=50000,      # <--- 新增：每 5 万 step 算作 epoch+1
+                 max_epoch_quant=300      # <--- 新增：量化器 max_epoch
                  ):
         super().__init__()
         # PL 2.x : manual optimization for multi-optimizer training
@@ -51,9 +54,24 @@ class VQModel(pl.LightningModule):
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
         self.loss = instantiate_from_config(lossconfig)
-        self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25,
-                                        remap=remap,
-                                        sane_index_shape=sane_index_shape)
+        # self.quantize = VectorQuantizer(n_embed, embed_dim, beta=0.25,
+        #                                 remap=remap,
+        #                                 sane_index_shape=sane_index_shape)
+        # ---- quantizer: 支持 instantiate_from_config，保留旧参数回退 ----
+        self.val_interval = int(val_interval)
+        self.max_epoch_quant = int(max_epoch_quant)
+
+        if quantizeconfig is not None:
+            # 走 instantiate_from_config 分支
+            self.quantize = instantiate_from_config(quantizeconfig)
+        else:
+            # 兼容旧行为（直接构造）
+            # 这里仍使用你原来的 VectorQuantizer；如需换成自定义量化器也可
+            self.quantize = VectorQuantizer(
+                n_embed, embed_dim, beta=0.25,
+                remap=remap,
+                sane_index_shape=sane_index_shape
+            )
         self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
         if colorize_nlabels is not None:
@@ -88,6 +106,17 @@ class VQModel(pl.LightningModule):
     # def on_fit_start(self):
     #     # ensure PIQ module is on the same device
     #     self.nlpd = self.nlpd.to(self.device)
+
+    def _call_quantizer(self, h, epoch=None, max_epoch=None):
+        """
+        调用 self.quantize(h, ...)；如果量化器 forward 支持 epoch/max_epoch 就带上，
+        不支持则自动回退到不带这两个参数的调用。
+        """
+        try:
+            return self.quantize(h, epoch=epoch, max_epoch=max_epoch)
+        except TypeError:
+            # 老版/不带 epoch 的量化器
+            return self.quantize(h)
 
     def _to_01(self, x):
         return (x + 1.0) / 2.0
@@ -125,11 +154,26 @@ class VQModel(pl.LightningModule):
         if self.use_ema:
             self.model_ema(self)
 
+    # def encode(self, x):
+    #     h = self.encoder(x)
+    #     h = self.quant_conv(h)
+    #     quant, emb_loss, info = self.quantize(h)
+    #     return quant, emb_loss, info
+
     def encode(self, x):
         h = self.encoder(x)
         h = self.quant_conv(h)
-        quant, emb_loss, info = self.quantize(h)
+
+        # 计算“伪 epoch”：每 val_interval 个 global_step 算作 1 个 epoch
+        pseudo_epoch = int(self.global_step // max(1, self.val_interval))
+        pseudo_epoch = min(pseudo_epoch, self.max_epoch_quant)  # 截断到 max_epoch_quant
+
+        # 量化：尽量带上 epoch/max_epoch，若不支持则自动回退
+        quant, emb_loss, info = self._call_quantizer(
+            h, epoch=pseudo_epoch, max_epoch=self.max_epoch_quant
+        )
         return quant, emb_loss, info
+
 
     def encode_to_prequant(self, x):
         h = self.encoder(x)
@@ -142,9 +186,23 @@ class VQModel(pl.LightningModule):
         return dec
 
     def decode_code(self, code_b):
-        quant_b = self.quantize.embed_code(code_b)
+        # 兼容不同量化器 API
+        if hasattr(self.quantize, "embed_code"):
+            quant_b = self.quantize.embed_code(code_b)
+        elif hasattr(self.quantize, "get_codebook_entry"):
+            # taming 的接口通常是 get_codebook_entry(indices, shape)
+            # 这里按 BCHW 组装 shape；C=embed_dim，H/W 需要上游知道
+            # 若 code_b 已是 [B, H, W] 的 index map，可以传 shape=(B, H, W, C)
+            # 但下游 decode 期望 BCHW 的量化张量，所以这里直接用 get_codebook_entry 后再 permute
+            # 最稳妥：假设 code_b 是 [B, H, W]，我们把 shape 交由量化器来还原
+            # 若你的量化器需要明确 shape，可在这里补一个 shape 推断逻辑。
+            quant_b = self.quantize.get_codebook_entry(code_b, None)
+        else:
+            raise AttributeError("Quantizer has neither 'embed_code' nor 'get_codebook_entry'")
+
         dec = self.decode(quant_b)
         return dec
+
 
     def forward(self, input, return_pred_indices=False):
         quant, diff, (_,_,ind) = self.encode(input)
@@ -293,6 +351,13 @@ class VQModel(pl.LightningModule):
         self.log("val/psnr",  psnr_val,  on_step=False, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bs)
         self.log("val/ssim",  ssim_val,  on_step=False, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bs)
         self.log("val/lpips", lpips_val, on_step=False, on_epoch=True, prog_bar=True,  sync_dist=True, batch_size=bs)
+        
+        print(
+            f"\n[Epoch {self.current_epoch}]"
+            f"\nval/psnr: {psnr_val:.6f},"
+            f"\nval/ssim: {ssim_val:.6f},"
+            f"\nval/lpips: {lpips_val:.6f},") 
+    
         # self.log("val/nlpd",  nlpd_val,  on_step=False, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bs)
         # ---- end metrics block ----
 
@@ -303,7 +368,7 @@ class VQModel(pl.LightningModule):
         # update bitmap on CPU to avoid GPU host syncs when large
         self.val_code_used[used_unique.cpu()] = True
 
-        return self.log_dict
+        return 
     
     def on_validation_epoch_start(self):
         # reset usage bitmap
@@ -315,6 +380,7 @@ class VQModel(pl.LightningModule):
         try:
             rfid_val = self.fid.compute()
             self.log("val/rfid", rfid_val, prog_bar=True, sync_dist=True)
+            print("\nval/rFID: {rfid_val: .6f}")
         finally:
             self.fid.reset()
 
@@ -336,7 +402,8 @@ class VQModel(pl.LightningModule):
         # log both
         self.log("val/codebook_used_count", used_count, prog_bar=False, sync_dist=False)
         self.log("val/codebook_usage_pct", usage_pct, prog_bar=True, sync_dist=False)
-
+        print(f"\nval/codebook_used_count: {used_count}")
+        print(f"\nval/codebook_usage_pct: {usage_pct}")
         # (optional) keep the merged view around for debugging
         self.val_code_used = merged.to(self.val_code_used.device)
 

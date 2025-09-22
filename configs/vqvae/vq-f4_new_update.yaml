@@ -2,7 +2,7 @@ model:
   base_learning_rate: 4.5e-06
   target: ldm.models.autoencoder.VQModel
   params:
-    embed_dim: 64
+    embed_dim: 3
     n_embed: 8192
     monitor: val/rec_loss
 
@@ -20,6 +20,7 @@ model:
       num_res_blocks: 2
       attn_resolutions: []
       dropout: 0.0
+
     lossconfig:
       target: taming.modules.losses.vqperceptual.VQLPIPSWithDiscriminator
       params:
@@ -28,6 +29,31 @@ model:
         disc_start: 0
         disc_weight: 0.75
         codebook_weight: 1.0
+
+    # === 新增：量化器通过 instantiate_from_config ===
+    quantizeconfig:
+      target: ldm.modules.quantizer.VectorQuantizer2_with_soft_dist   
+      params:
+        n_e: ${model.params.n_embed}
+        e_dim: ${model.params.embed_dim}
+        beta: 0.25
+        embedding_loss_weight: 0.01
+        remap: null                # 如需子集映射，填 .npy 路径；否则保持 null
+        sane_index_shape: true     # 需要 bhw 形状的 index map
+        mem_dict:
+          tau: 1.0
+          decay_dict:
+            method: exp
+            decay_rate: 0.1
+            warmup_flag: false
+            warmup_epochs: 2
+            warmup_type: cosine
+            peak_p: 1.0
+
+    # === 新增：把“每 50000 step 算 1 个 epoch”，量化器的 max_epoch=300 ===
+    val_interval: 100000
+    max_epoch_quant: 300
+
 
 data:
   target: main.DataModuleFromConfig

@@ -338,7 +338,7 @@ class VectorQuantizer2_with_soft_dist(nn.Module):
     # NOTE: due to a bug the beta term was applied to the wrong term. for
     # backwards compatibility we use the buggy version by default, but you can
     # specify legacy=False to fix it.
-    def __init__(self, n_e, e_dim, beta, remap=None, unknown_index="random",
+    def __init__(self, n_e, e_dim, beta, embedding_loss_weight = 0.01, remap=None, unknown_index="random",
                  sane_index_shape=False, legacy=True, mem_dict=None):
         super().__init__()
         self.n_e = n_e
@@ -348,7 +348,7 @@ class VectorQuantizer2_with_soft_dist(nn.Module):
 
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
-
+        self.embedding_loss_weight = embedding_loss_weight
         self.remap = remap
         if self.remap is not None:
             self.register_buffer("used", torch.tensor(np.load(self.remap)))
@@ -434,19 +434,41 @@ class VectorQuantizer2_with_soft_dist(nn.Module):
             if isinstance(user_decay, dict):
                 decay_dict.update(user_decay)
             tau = self.get_decay_p(**decay_dict)
-            soft_weights = self.mem_sample(d, tau=tau).detach() #[BWH,k]
+            soft_weights = self.embedding_loss_weight * self.n_e *self.mem_sample(d, tau=tau).detach() #[BWH,k]
 
             # Winner index
             winner_inds = encoding_inds    # [BHW, 1]
             one_hot_winner = encoding_one_hot          # [BHW, K]
             # Combine: winner → 1, others → soft weight
             combined_weights = soft_weights * (1 - one_hot_winner) + one_hot_winner
+            combined_weights = torch.clamp(combined_weights, min=0.0, max=1.0)
             # Compute squared distance to all embeddings
-            diff = z_flattened.unsqueeze(1).detach() - self.embedding.weight.unsqueeze(0)  # [BHW, K, D]
-            squared_error = diff.pow(2)  # [BHW, K, D]
-            mse_per_embedding = squared_error.mean(dim=-1)  # [BHW, K]
-            # Weighted embedding loss
-            embedding_loss = (combined_weights  * mse_per_embedding).sum() / z_flattened.shape[0]
+            # diff = z_flattened.unsqueeze(1).detach() - self.embedding.weight.unsqueeze(0)  # [BHW, K, D]
+            # squared_error = diff.pow(2)  # [BHW, K, D]
+            # mse_per_embedding = squared_error.mean(dim=-1)  # [BHW, K]
+            # # Weighted embedding loss
+            # embedding_loss = (combined_weights  * mse_per_embedding).sum() / z_flattened.shape[0]
+            embedding_loss = 0.0
+            chunk_size = 1024  # 你可以根据显存情况调整这个值
+            num_chunks = (z_flattened.shape[0] + chunk_size - 1) // chunk_size
+
+            for i in range(num_chunks):
+                start_idx = i * chunk_size
+                end_idx = min((i + 1) * chunk_size, z_flattened.shape[0])
+                
+                # 获取当前分块
+                chunk_latents = z_flattened[start_idx:end_idx]  # [chunk_size, D]
+                chunk_combined_weights = combined_weights[start_idx:end_idx] # [chunk_size, K]
+
+                # 在分块上进行计算，避免一次性生成大张量
+                diff = chunk_latents.unsqueeze(1).detach() - self.embedding.weight.unsqueeze(0)  # [chunk_size, K, D]
+                squared_error = diff.pow(2)  # [chunk_size, K, D]
+                mse_per_embedding = squared_error.mean(dim=-1)  # [chunk_size, K]
+
+                # 累加损失
+                embedding_loss += (chunk_combined_weights * mse_per_embedding).sum()
+
+            embedding_loss /= z_flattened.shape[0]
         else:
             embedding_loss = torch.mean((z_q - z.detach()) ** 2)
 
